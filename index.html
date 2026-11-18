@@ -11,6 +11,8 @@ try {
 } catch {}
 </script>
 <meta name="description" content="Hitung IPK, atur tugas, dan latihan flashcard dalam satu ruang belajar.">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>RuangSemester — Ruang belajar mahasiswa</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap');
@@ -51,6 +53,9 @@ header{height:66px;border-bottom:1px solid var(--line);background:white;display:
 #summary-text li+li{margin-top:5px}
 .generated-card{grid-template-columns:auto minmax(0,1fr);display:grid;font-size:inherit}
 .generated-card small{font-weight:400}
+.reminder-panel{display:flex;align-items:center;justify-content:space-between;gap:10px 18px;flex-wrap:wrap;margin-bottom:14px}
+.reminder-panel p{margin:4px 0}
+.reminder-panel .reminder-status{flex-basis:100%;font-size:13px}
 </style>
 </head>
 <body>
@@ -96,6 +101,11 @@ header{height:66px;border-bottom:1px solid var(--line);background:white;display:
 </section>
 <section id="tugas" class="page" hidden>
 <div class="intro"><h1>Jadwal tugas<span>.</span></h1><p>Catat tugas dan lihat tenggat terdekat.</p></div>
+<div class="panel reminder-panel">
+<div><h2>Pengingat H‑1</h2><p class="muted">Terima notifikasi sekitar pukul 08.00–09.00 WIB, termasuk saat situs ditutup.</p></div>
+<button class="secondary" id="reminder-toggle" type="button">Aktifkan notifikasi</button>
+<p class="muted reminder-status" id="reminder-status" role="status">Saat aktif, judul dan tenggat tugas yang belum selesai dikirim untuk menjadwalkan pengingat.</p>
+</div>
 <div class="panel"><form id="task-form" class="entry"><label>Nama tugas<input name="title" required maxlength="120" placeholder="Contoh: Laporan praktikum"></label><label>Tenggat<input name="due" type="date" required></label><button class="button" id="task-submit">Tambah tugas</button><button class="secondary" type="button" id="task-cancel" hidden>Batal</button></form></div>
 <div class="panel list-panel"><h2>Daftar tugas</h2><div id="tasks"></div></div>
 </section>
@@ -281,6 +291,7 @@ taskForm.onsubmit = (event) => {
   if (task) Object.assign(task, values);
   else tasks.push({ ...values, id: createId(), done: false });
   save('tasks', tasks);
+  syncReminders();
   finishTaskEdit();
   renderTasks();
   taskForm.elements.title.focus();
@@ -300,6 +311,7 @@ function renderTasks() {
     checkbox.onchange = () => {
       task.done = checkbox.checked;
       save('tasks', tasks);
+      syncReminders();
       renderTasks();
       document.getElementById('task-' + task.id)?.focus();
     };
@@ -313,6 +325,7 @@ function renderTasks() {
       if (editingTask === task.id) finishTaskEdit();
       tasks = tasks.filter(({ id }) => id !== task.id);
       save('tasks', tasks);
+      syncReminders();
       renderTasks();
     }));
     list.append(row);
@@ -665,5 +678,121 @@ renderTasks();
 renderCards();
 window.addEventListener('hashchange', route);
 route();
+
+const reminderToggle = select('#reminder-toggle');
+const reminderStatus = select('#reminder-status');
+const reminderTokenKey = 'ruangsemester-reminder-token';
+const canPush = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+let pushSubscription = null;
+let reminderToken = null;
+let reminderQueue = Promise.resolve();
+try {
+  reminderToken = localStorage.getItem(reminderTokenKey);
+} catch {}
+
+async function reminderRequest(method, body) {
+  const response = await fetch('/api/pengingat', {
+    method,
+    headers: method === 'GET' ? {} : {
+      'Content-Type': 'application/json', 'X-Reminder-Token': reminderToken
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(12000)
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result) throw new Error(result?.error || 'Tidak bisa terhubung ke layanan pengingat.');
+  return result;
+}
+
+async function sendReminderSchedule() {
+  await reminderRequest('PUT', {
+    subscription: pushSubscription.toJSON(),
+    tasks: tasks.filter(task => !task.done).map(({ title, due }) => ({ title, due }))
+  });
+  reminderStatus.textContent = 'Pengingat H‑1 aktif di perangkat ini.';
+}
+
+function syncReminders() {
+  if (!pushSubscription) return reminderQueue;
+  reminderQueue = reminderQueue.then(async () => {
+    if (pushSubscription) await sendReminderSchedule();
+  }).catch(() => {
+    reminderStatus.textContent = 'Jadwal belum tersinkron. Simpan perubahan atau buka kembali situs saat internet tersedia.';
+  });
+  return reminderQueue;
+}
+
+function showReminderState() {
+  reminderToggle.textContent = pushSubscription ? 'Nonaktifkan notifikasi' : 'Aktifkan notifikasi';
+}
+
+async function enableReminders() {
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    throw new Error('Izinkan notifikasi untuk RuangSemester di pengaturan browser, lalu coba lagi.');
+  }
+  const { publicKey } = await reminderRequest('GET');
+  const registration = await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.ready;
+  if (!reminderToken) {
+    reminderToken = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(reminderTokenKey, reminderToken);
+  }
+  pushSubscription = await registration.pushManager.getSubscription() ?? await registration.pushManager.subscribe({
+    userVisibleOnly: true, applicationServerKey: publicKey
+  });
+  showReminderState();
+  await syncReminders();
+}
+
+async function disableReminders() {
+  await reminderQueue;
+  const subscription = pushSubscription;
+  pushSubscription = null;
+  try {
+    await reminderRequest('DELETE');
+  } catch (error) {
+    pushSubscription = subscription;
+    throw error;
+  }
+  await subscription.unsubscribe();
+  reminderStatus.textContent = 'Pengingat dinonaktifkan di perangkat ini.';
+  showReminderState();
+}
+
+async function restoreReminders() {
+  if (!canPush) {
+    reminderToggle.disabled = true;
+    reminderStatus.textContent = 'Browser ini belum mendukung Web Push. Di iPhone, tambahkan RuangSemester ke Layar Utama dan buka dari sana.';
+    return;
+  }
+  if (!reminderToken || Notification.permission !== 'granted') return;
+  reminderToggle.disabled = true;
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    pushSubscription = await registration?.pushManager.getSubscription() ?? null;
+    showReminderState();
+    await syncReminders();
+  } catch {
+    reminderStatus.textContent = 'Pengingat belum tersinkron. Coba muat ulang halaman.';
+  } finally {
+    reminderToggle.disabled = false;
+  }
+}
+
+reminderToggle.onclick = async () => {
+  reminderToggle.disabled = true;
+  try {
+    if (pushSubscription) await disableReminders();
+    else await enableReminders();
+  } catch (error) {
+    reminderStatus.textContent = error.message;
+  } finally {
+    showReminderState();
+    reminderToggle.disabled = false;
+  }
+};
+window.addEventListener('online', syncReminders);
+restoreReminders();
 </script>
 </body></html>
