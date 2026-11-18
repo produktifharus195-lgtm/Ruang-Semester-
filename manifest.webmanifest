@@ -1,0 +1,14 @@
+{
+  "name": "RuangSemester",
+  "short_name": "RuangSemester",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#23134c",
+  "background_color": "#f8f8fc",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
