@@ -94,3 +94,37 @@ module.exports = async (req, res) => {
   if (!['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'CRON_SECRET'].every(name => process.env[name])) {
     return res.status(503).json({ error: 'Notifikasi belum dikonfigurasi oleh pengelola.' });
   }
+    try {
+    if (req.query?.cron === '1') {
+      if (req.method !== 'GET' || req.headers.authorization !== 'Bearer ' + process.env.CRON_SECRET) {
+        return res.status(401).json({ error: 'Akses ditolak.' });
+      }
+      return res.status(200).json(await sendReminders());
+    }
+    if (req.method === 'GET') return res.status(200).json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+    if (req.headers['sec-fetch-site'] === 'cross-site') return res.status(403).json({ error: 'Akses ditolak.' });
+    if (!['PUT', 'DELETE'].includes(req.method)) return res.status(405).json({ error: 'Metode tidak didukung.' });
+    const token = req.headers['x-reminder-token'];
+    if (typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)) return res.status(400).json({ error: 'Perangkat tidak valid.' });
+    const key = createHash('sha256').update(token).digest('hex');
+    if (req.method === 'DELETE') {
+      await redis('HDEL', subscriptions, key);
+      return res.status(200).json({ ok: true });
+    }
+    const { subscription, tasks } = req.body ?? {};
+    if (!validSubscription(subscription) || !Array.isArray(tasks) || tasks.length > 1000 ||
+      tasks.some(task => typeof task?.title !== 'string' || !task.title.trim() || task.title.length > 120 ||
+        typeof task.due !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(task.due))) {
+      return res.status(400).json({ error: 'Data pengingat tidak valid.' });
+    }
+    const pending = tasks.filter(task => task.due > dateInJakarta(Date.now()));
+    if (!pending.length) await redis('HDEL', subscriptions, key);
+    else await redis('HSET', subscriptions, key, JSON.stringify({
+      subscription: { endpoint: subscription.endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } },
+      tasks: pending.map(({ title, due }) => ({ title, due }))
+    }));
+    return res.status(200).json({ ok: true });
+  } catch {
+    return res.status(503).json({ error: 'Sinkronisasi pengingat gagal. Coba lagi.' });
+  }
+};
