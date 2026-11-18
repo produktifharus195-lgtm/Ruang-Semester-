@@ -1,0 +1,10 @@
+{
+  "framework": null,
+  "outputDirectory": ".",
+  "crons": [
+    {
+      "path": "/api/pengingat?cron=1",
+      "schedule": "0 1 * * *"
+    }
+  ]
+}
